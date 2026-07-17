@@ -21,6 +21,8 @@ import type { RigidBody } from '@/game/engine/RigidBody'
 const props = defineProps<{
   x: number
   y: number
+  /** Visual rotation in degrees (clockwise). The hitbox does not rotate. */
+  rotation?: number
   tag?: string
   body?: RigidBody | null
   collider?: AnyCollider | null
@@ -40,6 +42,7 @@ const obj = reactive(
   new GameObject({
     x: props.x,
     y: props.y,
+    rotation: props.rotation ?? 0,
     tag: props.tag ?? '',
     body: props.body ?? null,
     collider: props.collider ?? null,
@@ -74,6 +77,15 @@ watch(
   },
 )
 
+// Rotation is visual-only, so the prop stays in charge for EVERY object —
+// physics never writes it, dynamic body or not.
+watch(
+  () => props.rotation,
+  (rotation) => {
+    obj.rotation = rotation ?? 0
+  },
+)
+
 const style = computed(() => {
   const collider = obj.collider
   let w = 0
@@ -88,7 +100,7 @@ const style = computed(() => {
   return {
     width: `${w}px`,
     height: `${h}px`,
-    transform: `translate(${obj.position.x - w / 2}px, ${obj.position.y - h / 2}px)`,
+    transform: `translate(${obj.position.x - w / 2}px, ${obj.position.y - h / 2}px) rotate(${obj.rotation}deg)`,
   }
 })
 
