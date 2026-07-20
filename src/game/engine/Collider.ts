@@ -1,16 +1,32 @@
 /**
- * Colliders give a GameObject a physical shape.
+ * Colliders give a GameObject a physical shape. Each collider has exactly
+ * one mode:
  *
- * - Solid collider (isTrigger = false): things bounce off it.
- * - Trigger collider (isTrigger = true): things pass THROUGH it, but the
- *   World fires `trigger-enter` / `trigger-exit` events. Use it for goals,
- *   coins, checkpoints, lava zones...
+ * - 'collide' (default): solid. Blocks and bounces things; contacts fire
+ *   `collision` events.
+ * - 'trigger': sensor. Things pass THROUGH it; overlaps fire
+ *   `trigger-enter` / `trigger-exit` events. Goals, coins, checkpoints...
+ *
+ * No collider at all = decoration: can't touch, can't be touched.
  */
-export abstract class Collider {
-  isTrigger: boolean
+export type ColliderMode = 'collide' | 'trigger'
 
-  constructor(isTrigger = false) {
-    this.isTrigger = isTrigger
+/** Accepts the old boolean form too: true = 'trigger', false = 'collide'. */
+function normalizeMode(mode: ColliderMode | boolean): ColliderMode {
+  if (mode === true) return 'trigger'
+  if (mode === false) return 'collide'
+  return mode
+}
+
+export abstract class Collider {
+  mode: ColliderMode
+
+  constructor(mode: ColliderMode | boolean = 'collide') {
+    this.mode = normalizeMode(mode)
+  }
+
+  get isTrigger(): boolean {
+    return this.mode === 'trigger'
   }
 }
 
@@ -18,8 +34,8 @@ export class CircleCollider extends Collider {
   readonly shape = 'circle' as const
   radius: number
 
-  constructor(radius: number, isTrigger = false) {
-    super(isTrigger)
+  constructor(radius: number, mode: ColliderMode | boolean = 'collide') {
+    super(mode)
     this.radius = radius
   }
 }
@@ -29,8 +45,8 @@ export class BoxCollider extends Collider {
   width: number
   height: number
 
-  constructor(width: number, height: number, isTrigger = false) {
-    super(isTrigger)
+  constructor(width: number, height: number, mode: ColliderMode | boolean = 'collide') {
+    super(mode)
     this.width = width
     this.height = height
   }

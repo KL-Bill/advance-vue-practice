@@ -31,15 +31,21 @@ const REST_THRESHOLD = 40
 /**
  * The physics world. Owns every GameObject and, once per frame:
  *
- *   1. integrates: gravity -> velocity -> position
- *   2. bounces dynamic bodies off the arena walls
+ *   1. integrates: RigidBody objects get gravity + velocity; bodiless
+ *      objects glide by their own vx/vy (no gravity, no shoving)
+ *   2. keeps moving objects inside the arena walls
  *   3. tests every pair of colliders for overlap
- *      - solid vs solid  -> push apart, exchange impulse, fire 'collision'
- *      - anything trigger -> no physics, fire 'trigger-enter'/'trigger-exit'
+ *      - 'collide' vs 'collide' -> block/bounce, fire 'collision'
+ *      - 'trigger' involved     -> no blocking, fire 'trigger-enter'/'exit'
+ *
+ * WHO YIELDS ON IMPACT — one rule:
+ * - RigidBody objects yield: they get pushed, shoved, bounced (momentum).
+ * - Bodiless objects never get shoved. When THEY move into a solid they
+ *   are blocked, and their own velocity stops or rebounds per their
+ *   `bounce` dial (0 = stop/slide, 1 = full rebound).
  *
  * Events fire on the FRAME THE CONTACT STARTS (and, for triggers, ends) —
- * not every frame of overlap. That is what makes them usable as triggers:
- * "when the ball touches the goal" instead of "while the ball is in the goal".
+ * not every frame of overlap.
  */
 export class World {
   readonly width: number
@@ -53,6 +59,8 @@ export class World {
   private touchingPairs = new Map<string, Pair>()
   /** Trigger overlaps alive last frame — used for enter/exit edges. */
   private triggerPairs = new Map<string, Pair>()
+  /** Where everything was at the end of last frame — detects position-driven movement. */
+  private prevPositions = new Map<number, { x: number; y: number }>()
 
   constructor(width: number, height: number, gravity = 900) {
     this.width = width
@@ -69,6 +77,7 @@ export class World {
   remove(obj: GameObject) {
     this.objects.delete(obj.id)
     this.objectListeners.delete(obj.id)
+    this.prevPositions.delete(obj.id)
     // If the removed object was inside a trigger, the zone still deserves
     // its exit event (e.g. a collected coin leaving the collector's zone).
     for (const [key, pair] of this.triggerPairs) {
@@ -80,6 +89,33 @@ export class World {
     for (const [key, pair] of this.touchingPairs) {
       if (pair.a.id === obj.id || pair.b.id === obj.id) this.touchingPairs.delete(key)
     }
+  }
+
+  // ---- lookups --------------------------------------------------------------
+
+  /**
+   * First LIVING object with this tag, or null. Works best when the tag is
+   * unique (one 'player'); with duplicates you get whichever was added first.
+   */
+  find(tag: string): GameObject | null {
+    for (const obj of this.objects.values()) {
+      if (obj.alive && obj.tag === tag) return obj
+    }
+    return null
+  }
+
+  /** Every LIVING object with this tag. */
+  findAll(tag: string): GameObject[] {
+    const found: GameObject[] = []
+    for (const obj of this.objects.values()) {
+      if (obj.alive && obj.tag === tag) found.push(obj)
+    }
+    return found
+  }
+
+  /** Exact object by id — returns it even if killed (handy for revive()). */
+  findById(id: number): GameObject | null {
+    return this.objects.get(id) ?? null
   }
 
   // ---- event subscriptions ------------------------------------------------
@@ -111,16 +147,42 @@ export class World {
     this.integrate(dt)
     this.collideWalls()
     this.collidePairs()
+    this.rememberPositions()
   }
 
-  /** Apply gravity to velocity, velocity to position. */
+  /** Move everything that has motion: bodies get gravity, bodiless get vx/vy. */
   private integrate(dt: number) {
     for (const obj of this.objects.values()) {
+      if (!obj.alive) continue
       const body = obj.body
-      if (!body || body.isStatic) continue
-      body.velocity.y += this.gravity * body.gravityScale * dt
-      obj.position.x += body.velocity.x * dt
-      obj.position.y += body.velocity.y * dt
+      if (body && !body.isStatic) {
+        body.velocity.y += this.gravity * body.gravityScale * dt
+        obj.position.x += body.velocity.x * dt
+        obj.position.y += body.velocity.y * dt
+      } else if (!body && (obj.vx !== 0 || obj.vy !== 0)) {
+        // self-velocity: pure motion — no gravity, no momentum
+        obj.position.x += obj.vx * dt
+        obj.position.y += obj.vy * dt
+      }
+    }
+  }
+
+  /** Did this object move since the end of last frame (by ANY means)? */
+  private hasMoved(obj: GameObject): boolean {
+    const prev = this.prevPositions.get(obj.id)
+    if (!prev) return true // first frame: treat as moving so spawn overlaps resolve
+    return prev.x !== obj.position.x || prev.y !== obj.position.y
+  }
+
+  private rememberPositions() {
+    for (const obj of this.objects.values()) {
+      const prev = this.prevPositions.get(obj.id)
+      if (prev) {
+        prev.x = obj.position.x
+        prev.y = obj.position.y
+      } else {
+        this.prevPositions.set(obj.id, { x: obj.position.x, y: obj.position.y })
+      }
     }
   }
 
@@ -129,31 +191,54 @@ export class World {
     return { hw: collider.width / 2, hh: collider.height / 2 }
   }
 
-  /** Keep dynamic bodies inside the arena, bouncing with their bounciness. */
+  /** Keep moving objects inside the arena, per their bounce setting. */
   private collideWalls() {
     for (const obj of this.objects.values()) {
+      if (!obj.alive) continue
       const body = obj.body
-      if (!body || body.isStatic) continue
-      const { hw, hh } = obj.collider ? this.halfExtents(obj.collider) : { hw: 0, hh: 0 }
-      const pos = obj.position
-      const vel = body.velocity
 
-      if (pos.x - hw < 0) {
-        pos.x = hw
-        if (vel.x < 0) vel.x = -vel.x * body.bounciness
-      } else if (pos.x + hw > this.width) {
-        pos.x = this.width - hw
-        if (vel.x > 0) vel.x = -vel.x * body.bounciness
-      }
+      if (body && !body.isStatic) {
+        const { hw, hh } = obj.collider ? this.halfExtents(obj.collider) : { hw: 0, hh: 0 }
+        const pos = obj.position
+        const vel = body.velocity
 
-      if (pos.y - hh < 0) {
-        pos.y = hh
-        if (vel.y < 0) vel.y = -vel.y * body.bounciness
-      } else if (pos.y + hh > this.height) {
-        pos.y = this.height - hh
-        if (vel.y > 0) {
-          vel.y = -vel.y * body.bounciness
-          if (Math.abs(vel.y) < REST_THRESHOLD) vel.y = 0
+        if (pos.x - hw < 0) {
+          pos.x = hw
+          if (vel.x < 0) vel.x = -vel.x * body.bounciness
+        } else if (pos.x + hw > this.width) {
+          pos.x = this.width - hw
+          if (vel.x > 0) vel.x = -vel.x * body.bounciness
+        }
+
+        if (pos.y - hh < 0) {
+          pos.y = hh
+          if (vel.y < 0) vel.y = -vel.y * body.bounciness
+        } else if (pos.y + hh > this.height) {
+          pos.y = this.height - hh
+          if (vel.y > 0) {
+            vel.y = -vel.y * body.bounciness
+            if (Math.abs(vel.y) < REST_THRESHOLD) vel.y = 0
+          }
+        }
+      } else if (!body && (obj.vx !== 0 || obj.vy !== 0)) {
+        // self-velocity objects bounce off the arena edges per their dial
+        const { hw, hh } = obj.collider ? this.halfExtents(obj.collider) : { hw: 0, hh: 0 }
+        const pos = obj.position
+
+        if (pos.x - hw < 0) {
+          pos.x = hw
+          if (obj.vx < 0) obj.vx = -obj.vx * obj.bounce
+        } else if (pos.x + hw > this.width) {
+          pos.x = this.width - hw
+          if (obj.vx > 0) obj.vx = -obj.vx * obj.bounce
+        }
+
+        if (pos.y - hh < 0) {
+          pos.y = hh
+          if (obj.vy < 0) obj.vy = -obj.vy * obj.bounce
+        } else if (pos.y + hh > this.height) {
+          pos.y = this.height - hh
+          if (obj.vy > 0) obj.vy = -obj.vy * obj.bounce
         }
       }
     }
@@ -167,16 +252,18 @@ export class World {
 
     for (let i = 0; i < list.length; i++) {
       const a = list[i]
-      if (!a || !a.collider) continue
+      if (!a || !a.alive || !a.collider) continue
       for (let j = i + 1; j < list.length; j++) {
         const b = list[j]
-        if (!b || !b.collider) continue
+        if (!b || !b.alive || !b.collider) continue
 
         const isTriggerPair = a.collider.isTrigger || b.collider.isTrigger
         const aDynamic = !!a.body && !a.body.isStatic
         const bDynamic = !!b.body && !b.body.isStatic
-        // Two immovable solids can never produce anything interesting.
-        if (!isTriggerPair && !aDynamic && !bDynamic) continue
+        // Skip only if NOTHING here moves: no bodies AND neither side
+        // changed position since last frame (by velocity OR direct writes).
+        if (!isTriggerPair && !aDynamic && !bDynamic && !this.hasMoved(a) && !this.hasMoved(b))
+          continue
 
         const contact = this.findContact(a, a.collider, b, b.collider)
         if (!contact) continue
@@ -274,12 +361,7 @@ export class World {
     return { nx: 0, ny: -1, overlap: pushDown }
   }
 
-  private boxBox(
-    a: GameObject,
-    ca: BoxCollider,
-    b: GameObject,
-    cb: BoxCollider,
-  ): Contact | null {
+  private boxBox(a: GameObject, ca: BoxCollider, b: GameObject, cb: BoxCollider): Contact | null {
     const overlapX =
       Math.min(a.position.x + ca.width / 2, b.position.x + cb.width / 2) -
       Math.max(a.position.x - ca.width / 2, b.position.x - cb.width / 2)
@@ -296,39 +378,85 @@ export class World {
     return { nx: 0, ny: a.position.y < b.position.y ? 1 : -1, overlap: overlapY }
   }
 
-  // ---- solid collision response -------------------------------------------
+  // ---- solid collision response ---------------------------------------------
 
-  /** Push the pair apart, then bounce their velocities along the normal. */
+  /**
+   * Two branches, per the ownership rule:
+   * - A dynamic RigidBody in the pair -> physics: the body absorbs the
+   *   push-apart and the impulse (bodiless sides act as infinite mass, and
+   *   their own speed counts, so a fast-moving paddle shoves hard).
+   * - No dynamic bodies -> arcade: whichever side is MOVING gets pushed
+   *   back out and its self-velocity stops or rebounds per its `bounce`.
+   */
   private resolve(a: GameObject, b: GameObject, contact: Contact) {
-    const invA = a.body && !a.body.isStatic ? 1 : 0
-    const invB = b.body && !b.body.isStatic ? 1 : 0
-    const invSum = invA + invB
-    if (invSum === 0) return
-
     const { nx, ny, overlap } = contact
+    const aDynamic = !!a.body && !a.body.isStatic
+    const bDynamic = !!b.body && !b.body.isStatic
 
-    // Positional correction: movable side(s) absorb the overlap.
-    a.position.x -= nx * overlap * (invA / invSum)
-    a.position.y -= ny * overlap * (invA / invSum)
-    b.position.x += nx * overlap * (invB / invSum)
-    b.position.y += ny * overlap * (invB / invSum)
+    if (aDynamic || bDynamic) {
+      const invA = aDynamic ? 1 : 0
+      const invB = bDynamic ? 1 : 0
+      const invSum = invA + invB
 
-    // Impulse: only if the pair is still approaching.
-    const relX = (b.body?.velocity.x ?? 0) - (a.body?.velocity.x ?? 0)
-    const relY = (b.body?.velocity.y ?? 0) - (a.body?.velocity.y ?? 0)
-    const velAlongNormal = relX * nx + relY * ny
-    if (velAlongNormal > 0) return
+      // Positional correction: only bodies yield.
+      a.position.x -= nx * overlap * (invA / invSum)
+      a.position.y -= ny * overlap * (invA / invSum)
+      b.position.x += nx * overlap * (invB / invSum)
+      b.position.y += ny * overlap * (invB / invSum)
 
-    const bounciness = Math.min(a.body?.bounciness ?? 1, b.body?.bounciness ?? 1)
-    const impulse = (-(1 + bounciness) * velAlongNormal) / invSum
+      // Relative velocity includes bodiless self-velocity: moving paddles shove.
+      const avx = a.body ? a.body.velocity.x : a.vx
+      const avy = a.body ? a.body.velocity.y : a.vy
+      const bvx = b.body ? b.body.velocity.x : b.vx
+      const bvy = b.body ? b.body.velocity.y : b.vy
+      const velAlongNormal = (bvx - avx) * nx + (bvy - avy) * ny
+      if (velAlongNormal > 0) return
 
-    if (a.body && invA) {
-      a.body.velocity.x -= impulse * nx
-      a.body.velocity.y -= impulse * ny
+      const bounciness = Math.min(a.body?.bounciness ?? 1, b.body?.bounciness ?? 1)
+      const impulse = (-(1 + bounciness) * velAlongNormal) / invSum
+
+      if (a.body && invA) {
+        a.body.velocity.x -= impulse * nx
+        a.body.velocity.y -= impulse * ny
+      }
+      if (b.body && invB) {
+        b.body.velocity.x += impulse * nx
+        b.body.velocity.y += impulse * ny
+      }
+      return
     }
-    if (b.body && invB) {
-      b.body.velocity.x += impulse * nx
-      b.body.velocity.y += impulse * ny
+
+    // Arcade branch: bodiless vs bodiless. Moving side(s) get blocked.
+    const aMoving = a.vx !== 0 || a.vy !== 0 || this.hasMoved(a)
+    const bMoving = b.vx !== 0 || b.vy !== 0 || this.hasMoved(b)
+    const wA = aMoving ? 1 : 0
+    const wB = bMoving ? 1 : 0
+    const wSum = wA + wB
+    if (wSum === 0) return
+
+    a.position.x -= nx * overlap * (wA / wSum)
+    a.position.y -= ny * overlap * (wA / wSum)
+    b.position.x += nx * overlap * (wB / wSum)
+    b.position.y += ny * overlap * (wB / wSum)
+
+    // Each moving side reacts with its OWN velocity against the surface:
+    // bounce 0 -> the into-the-wall component dies (stop/slide),
+    // bounce 1 -> it flips (full rebound).
+    if (aMoving) {
+      const vn = a.vx * nx + a.vy * ny // component of a's motion toward b
+      if (vn > 0) {
+        const factor = 1 + a.bounce
+        a.vx -= factor * vn * nx
+        a.vy -= factor * vn * ny
+      }
+    }
+    if (bMoving) {
+      const vn = b.vx * -nx + b.vy * -ny // component of b's motion toward a
+      if (vn > 0) {
+        const factor = 1 + b.bounce
+        b.vx -= factor * vn * -nx
+        b.vy -= factor * vn * -ny
+      }
     }
   }
 }

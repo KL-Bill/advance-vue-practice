@@ -13,17 +13,26 @@ import type { RigidBody } from '@/game/engine/RigidBody'
  *
  * - on setup, it registers a GameObject with the injected World
  * - on unmount, it removes it (v-if / v-for splice = despawn)
- * - every frame, the engine mutates `obj.position` and — because the
- *   object is wrapped in reactive() — Vue moves the div automatically
- * - world events involving THIS object are re-emitted as Vue events,
- *   so gameplay logic is written as plain @handlers
+ * - kill() on the object hides it and stops all its interactions
+ * - world events involving THIS object are re-emitted as Vue events
+ *
+ * PROPS ARE SPAWN-ONLY. x/y (optional, default 0,0) place the object at
+ * birth; after that, the object's own variables are the one way to move
+ * it: `obj.position`, `obj.vx/vy`, `obj.applyImpulse(...)`. Get the
+ * object from a template ref (defineExpose) or an event payload.
  */
 const props = defineProps<{
-  x: number
-  y: number
+  /** Spawn position — read once at birth. Defaults to 0, 0. */
+  x?: number
+  y?: number
   /** Visual rotation in degrees (clockwise). The hitbox does not rotate. */
   rotation?: number
   tag?: string
+  /** Bodiless contact response: 0 = stop/slide (default), 1 = full rebound. */
+  bounce?: number
+  /** Self-velocity at spawn (bodiless objects only). */
+  vx?: number
+  vy?: number
   body?: RigidBody | null
   collider?: AnyCollider | null
   data?: unknown
@@ -33,17 +42,23 @@ const emit = defineEmits<{
   collision: [payload: GameObjectEventPayload]
   'trigger-enter': [payload: GameObjectEventPayload]
   'trigger-exit': [payload: GameObjectEventPayload]
+  /** Fired once when the object is kill()ed. */
+  destroyed: [self: GameObject]
 }>()
 
 const world = inject(WORLD_KEY)
 if (!world) throw new Error('<GameObjectBase> must be placed inside a <GameWorld>')
 
+// reactive() makes the engine's per-frame mutations drive Vue re-renders.
 const obj = reactive(
   new GameObject({
-    x: props.x,
-    y: props.y,
+    x: props.x ?? 0,
+    y: props.y ?? 0,
     rotation: props.rotation ?? 0,
     tag: props.tag ?? '',
+    bounce: props.bounce ?? 0,
+    vx: props.vx ?? 0,
+    vy: props.vy ?? 0,
     body: props.body ?? null,
     collider: props.collider ?? null,
     data: props.data,
@@ -65,24 +80,19 @@ onUnmounted(() => {
   world.remove(obj)
 })
 
-// Objects WITHOUT a dynamic body (walls, zones, paddles) stay prop-driven:
-// bind :x to a ref and changing the ref moves the object. Dynamic bodies
-// belong to the physics engine after spawn, so prop changes are ignored.
-watch(
-  () => [props.x, props.y] as const,
-  ([x, y]) => {
-    if (obj.body && !obj.body.isStatic) return
-    obj.position.x = x
-    obj.position.y = y
-  },
-)
-
-// Rotation is visual-only, so the prop stays in charge for EVERY object —
-// physics never writes it, dynamic body or not.
+// Rotation stays prop-driven (visual only — physics never writes it).
 watch(
   () => props.rotation,
   (rotation) => {
     obj.rotation = rotation ?? 0
+  },
+)
+
+// kill() -> tell the page, in case it wants to react (score, respawn...).
+watch(
+  () => obj.alive,
+  (alive) => {
+    if (!alive) emit('destroyed', obj)
   },
 )
 
@@ -108,7 +118,7 @@ defineExpose({ obj })
 </script>
 
 <template>
-  <div class="game-object" :style="style">
+  <div v-if="obj.alive" class="game-object" :style="style">
     <slot :obj="obj" />
   </div>
 </template>
