@@ -45,6 +45,10 @@ export class GameObject {
   position: Vec2
   /** Degrees, clockwise. Rendering only — physics ignores it. */
   rotation: number
+  /** Degrees per second. Free to set for a constant spin, or set BY rotateTo(). */
+  angularVelocity: number
+  /** Internal: the target rotateTo() is animating toward, or null if none active. */
+  rotateTarget: number | null
   /** False after kill(). Dead objects are invisible and touch nothing. */
   alive: boolean
   /** Self-velocity (px/s), used only when there is no RigidBody. */
@@ -61,6 +65,8 @@ export class GameObject {
     this.tag = options.tag ?? ''
     this.position = vec2(options.x ?? 0, options.y ?? 0)
     this.rotation = options.rotation ?? 0
+    this.angularVelocity = 0
+    this.rotateTarget = null
     this.alive = true
     this.vx = options.vx ?? 0
     this.vy = options.vy ?? 0
@@ -84,6 +90,28 @@ export class GameObject {
   /** Undo kill(): the object reappears exactly where it was. */
   revive() {
     this.alive = true
+  }
+
+  // ---- rotation ---------------------------------------------------------
+
+  /**
+   * Smoothly rotate to `targetDegrees` over `durationMs`, auto-stopping
+   * exactly on arrival — no overshoot, no manual stop call needed.
+   *
+   * NOTE: like position, rotation has ONE owner. If this object's
+   * `:rotation` prop is bound to a ref elsewhere, that binding will keep
+   * overwriting whatever rotateTo() is animating. Use rotateTo() only on
+   * objects that don't bind `:rotation`.
+   */
+  rotateTo(targetDegrees: number, durationMs: number) {
+    if (durationMs <= 0) {
+      this.rotation = targetDegrees
+      this.angularVelocity = 0
+      this.rotateTarget = null
+      return
+    }
+    this.angularVelocity = (targetDegrees - this.rotation) / (durationMs / 1000)
+    this.rotateTarget = targetDegrees
   }
 
   // ---- motion (works with OR without a RigidBody) ---------------------

@@ -145,6 +145,7 @@ export class World {
   /** Advance the whole world by `dt` seconds. Called once per animation frame. */
   step(dt: number) {
     this.integrate(dt)
+    this.integrateRotation(dt)
     this.collideWalls()
     this.collidePairs()
     this.rememberPositions()
@@ -163,6 +164,28 @@ export class World {
         // self-velocity: pure motion — no gravity, no momentum
         obj.position.x += obj.vx * dt
         obj.position.y += obj.vy * dt
+      }
+    }
+  }
+
+  /**
+   * Spin toward any active rotateTo() target; free-spin (angularVelocity
+   * set directly, no target) just keeps going forever. Runs for every
+   * alive object, body or not — rotation is always visual-only.
+   */
+  private integrateRotation(dt: number) {
+    for (const obj of this.objects.values()) {
+      if (!obj.alive || obj.angularVelocity === 0) continue
+      obj.rotation += obj.angularVelocity * dt
+      if (obj.rotateTarget === null) continue
+
+      const overshot =
+        (obj.angularVelocity > 0 && obj.rotation >= obj.rotateTarget) ||
+        (obj.angularVelocity < 0 && obj.rotation <= obj.rotateTarget)
+      if (overshot) {
+        obj.rotation = obj.rotateTarget
+        obj.angularVelocity = 0
+        obj.rotateTarget = null
       }
     }
   }
