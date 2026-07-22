@@ -114,6 +114,39 @@ export class GameObject {
     this.rotateTarget = targetDegrees
   }
 
+  // ---- size ---------------------------------------------------------------
+
+  /**
+   * The object's width, regardless of collider shape — reads/writes
+   * straight through to the box's width, or the circle's diameter.
+   * `obj.width = 150` resizes it live, no need to know or reach into
+   * the collider underneath. 0 if there's no collider.
+   */
+  get width(): number {
+    if (!this.collider) return 0
+    return this.collider.shape === 'circle' ? this.collider.radius * 2 : this.collider.width
+  }
+
+  set width(value: number) {
+    if (!this.collider) return
+    if (this.collider.shape === 'circle') this.collider.radius = value / 2
+    else this.collider.width = value
+  }
+
+  /** Same as `width`, for the vertical axis. A circle has no separate
+   *  height — it's the same as width (its diameter), so setting either
+   *  resizes the whole circle. */
+  get height(): number {
+    if (!this.collider) return 0
+    return this.collider.shape === 'circle' ? this.collider.radius * 2 : this.collider.height
+  }
+
+  set height(value: number) {
+    if (!this.collider) return
+    if (this.collider.shape === 'circle') this.collider.radius = value / 2
+    else this.collider.height = value
+  }
+
   // ---- motion (works with OR without a RigidBody) ---------------------
 
   /**
